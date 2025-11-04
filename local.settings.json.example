@@ -1,0 +1,47 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "DefaultEndpointsProtocol=https;AccountName=<your-storage-account>;AccountKey=<your-key>;EndpointSuffix=core.windows.net",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    
+    "STORAGE_ACCOUNT_NAME": "<your-storage-account>",
+    "CONTAINER_NAME": "content",
+    "LOG_CONTAINER_NAME": "logs",
+    
+    "CSV_CONTAINER_NAME": "config",
+    "CSV_FILE_PATH": "input.csv",
+    
+    "MAX_WORKERS": "2",
+    "MAX_DEPTH": "3",
+    "REQUEST_DELAY": "0.5",
+    "PAGE_TIMEOUT_MS": "45000",
+    "NETWORK_IDLE_WAIT_MS": "0",
+    "MAX_CONTENT_CHARS": "50000",
+    "INCLUDE_PDFS": "true",
+    "INCLUDE_DOCX": "true",
+    "INCLUDE_XLSX": "true",
+    "PDF_DOWNLOAD_TIMEOUT_MS": "60000",
+    "TOKEN_OVERLAP": "300",
+    "MAX_PDF_BYTES": "20000000",
+    "RESPECT_ROBOTS": "true",
+    "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "RETRY_COUNT": "3",
+    "RETRY_BACKOFF_FACTOR": "2",
+    "SAVE_404": "false",
+    
+    "AZURE_OPENAI_API_KEY": "<your-openai-api-key>",
+    "AZURE_OPENAI_ENDPOINT": "https://<your-openai-resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_VERSION": "2023-05-15",
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME": "myproject-text-embedding-ada-002",
+    "AZURE_OPENAI_EMBEDDING_MODEL_NAME": "text-embedding-ada-002",
+    "EMBEDDING_TOKEN_LIMIT": "8191",
+    
+    "CRAWL_CRON": "0 0 2 * * *",
+    
+    "SKIP_REGEXES": "\\.pdf$;\\.docx?$;\\.xlsx?$",
+    
+    "LEGACY_BASE_URLS": "",
+    "LEGACY_ALLOW_DOMAINS": ""
+  }
+}

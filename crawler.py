@@ -81,6 +81,7 @@ sitemap_urls = []
 failed = []
 robots_cache = {}
 collection_lock = Lock()
+url_filename_mapping = {}  # Maps URL to custom filename from CSV
 
 # Dedup cache: (url, chunk_index)
 seen = set()
@@ -149,18 +150,27 @@ def normalize_url(url):
     path = p.path.rstrip("/")
     return urlunparse((scheme, netloc, path, "", "", ""))
 
-def blob_name_for_url(url, chunk_index=None):
-    parsed = urlparse(url)
-    fragment = parsed.fragment or ""
-    base_url = urlunparse((parsed.scheme, parsed.netloc.lower().replace("www.", ""), parsed.path.rstrip("/"), "", "", ""))
-    url_hash = hashlib.md5((base_url + "#" + fragment).encode("utf-8")).hexdigest()
-    base = sanitize(parsed.path or "root")
-    if fragment:
-        base = f"{base}_{sanitize(fragment)}"
-    if chunk_index is not None:
-        return f"{base}_{chunk_index}_{url_hash}.json"
+def blob_name_for_url(url, chunk_index=None, custom_filename=None):
+    if custom_filename:
+        # Use custom filename from CSV, remove extension and sanitize
+        base = sanitize(os.path.splitext(custom_filename)[0])
+        if chunk_index is not None:
+            return f"{base}_{chunk_index}.json"
+        else:
+            return f"{base}.json"
     else:
-        return f"{base}_{url_hash}.json"
+        # Original logic for when no custom filename is provided
+        parsed = urlparse(url)
+        fragment = parsed.fragment or ""
+        base_url = urlunparse((parsed.scheme, parsed.netloc.lower().replace("www.", ""), parsed.path.rstrip("/"), "", "", ""))
+        url_hash = hashlib.md5((base_url + "#" + fragment).encode("utf-8")).hexdigest()
+        base = sanitize(parsed.path or "root")
+        if fragment:
+            base = f"{base}_{sanitize(fragment)}"
+        if chunk_index is not None:
+            return f"{base}_{chunk_index}_{url_hash}.json"
+        else:
+            return f"{base}_{url_hash}.json"
 
 def robot_allows(url, agent):
     if not RESPECT_ROBOTS:
@@ -356,6 +366,10 @@ def emit_chunks(url, text, last_mod):
         api_version=api_version,
         azure_endpoint=endpoint 
     )
+    
+    # Get custom filename from mapping
+    custom_filename = url_filename_mapping.get(normalize_url(url))
+    
     for idx, chunk in enumerate(windows, 1):
         if not chunk or not chunk.strip():
             log(f"Skipping empty chunk {idx} for {url}")
@@ -365,14 +379,14 @@ def emit_chunks(url, text, last_mod):
         rec = {
             "id": uuid.uuid4().hex,
             "url": url,
-            "title": sanitize(urlparse(url).path),
+            "title": custom_filename if custom_filename else sanitize(urlparse(url).path),
             "chunk_index": idx,
             "chunk_total": len(windows),
             "content": chunk,
             "last_modified": last_mod,
             "embedding": embedding,
         }
-        filename = blob_name_for_url(url, chunk_index=idx)
+        filename = blob_name_for_url(url, chunk_index=idx, custom_filename=custom_filename)
         key = (url, idx)
         if key not in seen and upload_json(rec, filename, content_container, last_modified=last_mod):
             with collection_lock:
@@ -575,13 +589,17 @@ def handle_page(playwright_ctx, url: str):
             return []
         if resp.status == 404:
             if SAVE_404:
+                custom_filename = url_filename_mapping.get(normalize_url(url))
                 rec404 = {
                     "id": uuid.uuid4().hex,
                     "url": norm_url,
                     "content": "",
                     "status": 404
                 }
-                filename = f"404_{sanitize(urlparse(norm_url).path)}_{rec404['id']}.json"
+                if custom_filename:
+                    filename = f"404_{sanitize(os.path.splitext(custom_filename)[0])}_{rec404['id']}.json"
+                else:
+                    filename = f"404_{sanitize(urlparse(norm_url).path)}_{rec404['id']}.json"
                 upload_json(rec404, filename, content_container)
             pg.close()
             return []
@@ -715,26 +733,96 @@ def bfs_crawl_parallel(seed_urls):
                 except Exception as e:
                     log(f"Crawl task failed for {url}: {e}")
 
+def load_urls_from_csv(csv_file_path="input.csv"):
+    """
+    Read URLs and filenames from CSV file.
+    First tries to read from blob storage, then falls back to local file.
+    Returns a list of URLs and populates the global url_filename_mapping.
+    """
+    global url_filename_mapping
+    urls = []
+    
+    # Try to read from blob storage first
+    csv_container_name = os_env("CSV_CONTAINER_NAME", "config")  # New env variable
+    try:
+        log(f"Attempting to read CSV from blob storage: {csv_container_name}/{csv_file_path}")
+        csv_container = blob_service.get_container_client(csv_container_name)
+        blob_client = csv_container.get_blob_client(csv_file_path)
+        
+        # Download CSV content from blob
+        csv_content = blob_client.download_blob().readall()
+        
+        # Create a temporary file to read with pandas
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='wb', suffix='.csv', delete=False) as temp_file:
+            temp_file.write(csv_content)
+            temp_csv_path = temp_file.name
+        
+        try:
+            df = pd.read_csv(temp_csv_path, encoding='utf-8-sig')
+            log(f"Successfully loaded CSV from blob storage with {len(df)} rows")
+        finally:
+            # Clean up temp file
+            try:
+                os.unlink(temp_csv_path)
+            except:
+                pass
+                
+    except Exception as blob_error:
+        log(f"Failed to read CSV from blob storage: {blob_error}")
+        # Fall back to local file
+        try:
+            log(f"Falling back to local CSV file: {csv_file_path}")
+            df = pd.read_csv(csv_file_path, encoding='utf-8-sig')
+            log(f"Successfully loaded local CSV with {len(df)} rows")
+        except Exception as local_error:
+            log(f"Error reading local CSV file {csv_file_path}: {local_error}")
+            return urls
+    
+    try:
+        # Clean column names and get first two columns
+        df.columns = df.columns.str.strip()
+        url_column = df.columns[0]  # Should be 'Url' (after BOM removal)
+        filename_column = df.columns[1]  # Should be 'Filename'
+        
+        log(f"Using columns: URL='{url_column}', Filename='{filename_column}'")
+        
+        for _, row in df.iterrows():
+            url = row[url_column].strip() if pd.notna(row[url_column]) else None
+            filename = row[filename_column].strip() if pd.notna(row[filename_column]) else None
+            
+            if url and filename:
+                normalized_url = normalize_url(url)
+                urls.append(url)
+                url_filename_mapping[normalized_url] = filename
+                
+                # Also add the domain to ALLOW_DOMAINS
+                domain = urlparse(url).netloc.lower().replace("www.", "")
+                ALLOW_DOMAINS.add(domain)
+                
+        log(f"Loaded {len(urls)} URLs from CSV with custom filenames")
+        log(f"Added {len(ALLOW_DOMAINS)} domains to ALLOW_DOMAINS")
+        
+    except Exception as e:
+        log(f"Error processing CSV data: {e}")
+        
+    return urls
+
 def start_crawl():
     log(f"MAX_WORKERS is {MAX_WORKERS}")
     try:
-        seeds = [u.strip() for u in os_env("BASE_URLS", "").split(";") if u.strip()]
-        for s in seeds:
-            ALLOW_DOMAINS.add(urlparse(s).netloc.lower().replace("www.", ""))
-        urls = []
-        for seed in seeds:
-            sm_url = seed.rstrip("/") + "/sitemap.xml"
-            entries = parse_sitemap(sm_url)
-            if entries:
-                log(f"✅ Using sitemap for {seed} ({len(entries)} URLs)")
-                for u in entries:
-                    norm_u = normalize_url(u)
-                    if norm_u not in visited:
-                        urls.append(u)
-            else:
-                log(f"⚠️ No sitemap for {seed}; falling back to seed URL")
-                urls.append(seed)
-        log(f"🚀 Starting BFS crawl with {len(urls)} URLs (parallel)")
+        # Get CSV file path from environment variable or use default
+        csv_file_path = os_env("CSV_FILE_PATH", "input.csv")
+        log(f"Using CSV file: {csv_file_path}")
+        
+        # Load URLs from CSV file instead of environment variables
+        urls = load_urls_from_csv(csv_file_path)
+        
+        if not urls:
+            log("No URLs found in CSV file")
+            return
+            
+        log(f"🚀 Starting BFS crawl with {len(urls)} URLs from CSV (parallel)")
         bfs_crawl_parallel(urls)
     except Exception as e:
         log(f"Crawl failed: {e}")
